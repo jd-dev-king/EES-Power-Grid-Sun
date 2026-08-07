@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ees_industrial_universe
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+  api:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes: ["./backend:/app"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/ees_industrial_universe
+      API_KEY: change-me
+      CORS_ORIGINS: http://localhost:5500,http://localhost:8080
+    command: sh -c "pip install -r requirements.txt && python -m app.seed && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports: ["8000:8000"]
+    depends_on: [postgres]
+  web:
+    image: nginx:alpine
+    volumes: ["./web:/usr/share/nginx/html:ro"]
+    ports: ["8080:80"]
+volumes:
+  pgdata:
