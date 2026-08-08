@@ -1,5 +1,5 @@
 window.POWER_GRID_SUN_CONFIG = {
-  apiBaseUrl: localStorage.getItem('eesApiBase') || 'http://localhost:8000',
-  refreshMs: 4000,
-  demoModeFallback: true
+  apiBaseUrl:
+    localStorage.getItem('eesApiBase') ||
+    'https://ees-power-grid-sun-production.up.railway.app',
 };
