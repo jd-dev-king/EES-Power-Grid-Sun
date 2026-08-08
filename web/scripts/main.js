@@ -1,11 +1,76 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-const cfg = window.POWER_GRID_SUN_CONFIG; let snapshot = null, scope = 'CAMPUS', selected = null;
+const cfg = window.POWER_GRID_SUN_CONFIG;
+
+let snapshot = null;
+let scope = 'CAMPUS';
+let selected = null;
+
+let hasLiveSnapshot = false;
+let fetchInProgress = false;
+
 const $ = id => document.getElementById(id);
 const demo = { timestamp: new Date().toISOString(), campus: { real_power_kw: 1048.4, reactive_power_kvar: 273.2, apparent_power_kva: 1083.4, power_factor: .968, open_alerts: 2 }, facilities: [{ code: 'PHARMA', name: 'Pharma Manufacturing Plant', real_power_kw: 394.2, assets_running: 6, faults: 0 }, { code: 'LOGISTICS', name: 'Global Supply Logistics Facility', real_power_kw: 285.7, assets_running: 5, faults: 1 }, { code: 'UTILITIES', name: 'Central Utilities Plant', real_power_kw: 344.6, assets_running: 6, faults: 1 }, { code: 'EXEC', name: 'EES Executive Suites', real_power_kw: 23.9, assets_running: 2, faults: 0 }], assets: [], alerts: [{ severity: 'HIGH', asset_code: 'COLD-420', title: 'Cold storage compressor current deviation', message: 'Current is 11% above learned operating baseline.' }, { severity: 'HIGH', asset_code: 'AC-01', title: 'Compressed-air leak signature', message: 'Loaded runtime increased while header demand remained stable.' }] };
 const names = [['PHARMA', 'TAB-201', 'Tablet Press', 62.4, 78, .91, 54, 94], ['PHARMA', 'FILL-301', 'Bottle Filling Line', 31.8, 46, .90, 48, 98], ['LOGISTICS', 'CONV-401', 'Main Sortation Conveyor', 51.6, 74, .88, 55, 96], ['LOGISTICS', 'COLD-420', 'Cold Storage Compressors', 126.2, 181, .86, 74, 82], ['UTILITIES', 'CH-01', 'Process Chiller 1', 298.3, 44, .91, 69, 93], ['UTILITIES', 'AC-01', 'Plant Air Compressor 1', 179.7, 255, .85, 78, 84], ['EXEC', 'EOC-IT', 'Executive Data Systems', 22.8, 66, .98, 36, 99]];
 demo.assets = names.map((x, i) => ({ asset_id: String(i), facility: x[0], code: x[1], name: x[2], area: 'Industrial Area', asset_type: 'motor', critical: i % 2 === 0, operating_state: 'RUNNING', voltage_v: x[0] === 'UTILITIES' && i === 4 ? 4160 : 480, current_a: x[4], real_power_kw: x[3], reactive_power_kvar: x[3] * .25, apparent_power_kva: x[3] / x[5], power_factor: x[5], frequency_hz: 59.99, breaker_utilization_pct: 63, temperature_c: x[6], health_pct: x[7], fault_code: x[7] < 90 ? 'ANOMALY_DETECTED' : null }));
-async function fetchSnapshot() { try { const r = await fetch(cfg.apiBaseUrl + '/api/v1/system/current'); if (!r.ok) throw Error(r.status); snapshot = await r.json(); $('apiState').textContent = 'Railway PostgreSQL Live'; $('apiDot').style.background = '#58e8ff' } catch (e) { snapshot = demo; $('apiState').textContent = 'Demo Telemetry'; $('apiDot').style.background = '#ffc75a' } render() }
+async function fetchSnapshot() {
+  if (fetchInProgress) return;
+
+  fetchInProgress = true;
+
+  try {
+    const r = await fetch(
+      cfg.apiBaseUrl + '/api/v1/system/current',
+      {
+        cache: 'no-store'
+      }
+    );
+
+    if (!r.ok) {
+      throw new Error(`HTTP ${r.status}`);
+    }
+
+    const liveSnapshot = await r.json();
+
+    snapshot = liveSnapshot;
+    hasLiveSnapshot = true;
+
+    $('apiState').textContent =
+      'Railway PostgreSQL Live';
+
+    $('apiDot').style.background =
+      '#58e8ff';
+
+  } catch (e) {
+    console.warn(
+      'Power Grid API refresh failed:',
+      e
+    );
+
+    if (!hasLiveSnapshot) {
+      snapshot = demo;
+
+      $('apiState').textContent =
+        'Demo Telemetry';
+
+      $('apiDot').style.background =
+        '#ffc75a';
+
+    } else {
+      // Keep the last known-good Railway snapshot.
+      $('apiState').textContent =
+        'Railway Live · Refresh Delayed';
+
+      $('apiDot').style.background =
+        '#ffc75a';
+    }
+
+  } finally {
+    fetchInProgress = false;
+  }
+
+  render();
+}
 function render() { let facilities = snapshot.facilities, assets = snapshot.assets; if (scope !== 'CAMPUS') { facilities = facilities.filter(f => f.code === scope); assets = assets.filter(a => a.facility === scope) } $('load').textContent = (scope === 'CAMPUS' ? snapshot.campus.real_power_kw : facilities.reduce((s, f) => s + f.real_power_kw, 0)).toFixed(1) + ' kW'; $('pf').textContent = snapshot.campus.power_factor.toFixed(3); $('kvar').textContent = snapshot.campus.reactive_power_kvar.toFixed(1) + ' kvar'; $('alerts').textContent = snapshot.campus.open_alerts; $('timestamp').textContent = new Date(snapshot.timestamp).toLocaleTimeString(); $('assets').innerHTML = assets.map(a => `<div class="asset" data-code="${a.code}"><div><b>${a.name}</b><small>${a.code} · ${a.area}</small></div><div><strong>${a.real_power_kw.toFixed(1)} kW</strong><small>${a.current_a.toFixed(1)} A · PF ${a.power_factor}</small></div></div>`).join('') || '<p>No live assets in scope.</p>'; $('alertList').innerHTML = snapshot.alerts.map(a => `<div class="alert ${a.severity.toLowerCase()}"><strong>${a.title}</strong><small>${a.message}</small></div>`).join('') || '<p>No active alerts.</p>'; document.querySelectorAll('.asset').forEach(el => el.onclick = () => openAsset(el.dataset.code)); drawChart(facilities); updateScene(scope) }
 function openAsset(code) { selected = snapshot.assets.find(a => a.code === code); if (!selected) return; $('assetName').textContent = selected.name; $('assetMetrics').innerHTML = Object.entries({ 'Asset code': selected.code, 'Facility': selected.facility, 'Operating state': selected.operating_state, 'Real power': selected.real_power_kw + ' kW', 'Voltage': selected.voltage_v + ' V', 'Current': selected.current_a + ' A', 'Power factor': selected.power_factor, 'Frequency': selected.frequency_hz + ' Hz', 'Breaker utilization': selected.breaker_utilization_pct + '%', 'Temperature': selected.temperature_c + ' °C', 'Health': selected.health_pct + '%', 'Fault': selected.fault_code || 'None' }).map(([k, v]) => `<div class="metric"><span>${k}</span><b>${v}</b></div>`).join(''); $('drawer').classList.add('open') }
 $('closeDrawer').onclick = () => $('drawer').classList.remove('open'); $('diagnose').onclick = async () => { if (!selected) return; try { const r = await fetch(cfg.apiBaseUrl + '/api/v1/diagnostics', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': 'change-me' }, body: JSON.stringify({ asset_code: selected.code }) }); const d = await r.json(); localStorage.setItem('eesRcDiagnostic', JSON.stringify(d)); alert('Diagnostic request created: ' + d.request_id) } catch { localStorage.setItem('eesRcDiagnostic', JSON.stringify({ operating_snapshot: selected, status: 'DEMO' })); alert('Demo diagnostic packet staged for RC Controls Twin.') } };
