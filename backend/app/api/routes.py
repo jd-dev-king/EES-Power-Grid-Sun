@@ -1,10 +1,11 @@
+import httpx
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models.entities import Asset, ElectricalTelemetry, Forecast, DiagnosticRequest
+from app.models.entities import Asset, ElectricalTelemetry, Forecast
 from app.schemas.api import TelemetryIn, DiagnosticIn, ForecastRequest, SimulationTickRequest
 from app.services.power_math import three_phase_metrics, single_phase_metrics
 from app.services.simulator import run_tick
@@ -76,17 +77,83 @@ def forecast(payload: ForecastRequest, db: Session = Depends(get_db)):
     return {**result, "scope": payload.scope, "horizon_minutes": payload.horizon_minutes,
             "overload_probability": probability, "limit_kw": limit}
 
-@router.post("/diagnostics", dependencies=[Depends(require_key)])
-def request_diagnostic(payload: DiagnosticIn, db: Session = Depends(get_db)):
-    asset = db.query(Asset).filter(Asset.code == payload.asset_code).one_or_none()
-    if not asset: raise HTTPException(404, "Asset not found")
-    latest = db.query(ElectricalTelemetry).filter(ElectricalTelemetry.asset_id == asset.asset_id).order_by(ElectricalTelemetry.recorded_at.desc()).first()
-    if not latest: raise HTTPException(409, "No telemetry for asset")
-    snapshot = {"asset_code": asset.code, "asset_name": asset.name, "voltage_v": latest.voltage_v,
-        "current_a": latest.current_a, "real_power_kw": latest.real_power_kw, "power_factor": latest.power_factor,
-        "frequency_hz": latest.frequency_hz, "temperature_c": latest.equipment_temperature_c,
-        "health_pct": latest.health_pct, "fault_code": latest.fault_code, "control_voltage_v": asset.metadata_json.get("control_voltage_v",24)}
-    req = DiagnosticRequest(source_asset_id=asset.asset_id, diagnostic_type=payload.diagnostic_type,
-                            operating_snapshot=snapshot)
-    db.add(req); db.commit()
-    return {"request_id": str(req.request_id), "status": req.status, "operating_snapshot": snapshot}
+@router.post("/diagnostics")
+def request_diagnostic(
+    payload: DiagnosticIn,
+    db: Session = Depends(get_db)
+):
+
+    # Look up the requested asset from the canonical
+    # Power Grid snapshot rather than the obsolete core.assets model.
+    snapshot = current_snapshot(db)
+
+    asset = next(
+        (
+            item
+            for item in snapshot["assets"]
+            if item["code"] == payload.asset_code
+        ),
+        None,
+    )
+
+    if not asset:
+        raise HTTPException(
+            status_code=404,
+            detail="Power Grid asset not found."
+        )
+
+    rc_payload = {
+        "source": "EES Power Grid Sun",
+        "asset": asset["name"],
+        "scenario": (
+            f"Power Grid diagnostic request — "
+            f"{payload.diagnostic_type}"
+        ),
+        "entities": {
+            "asset_code": asset["code"],
+            "voltage_v": asset["voltage_v"],
+            "current_a": asset["current_a"],
+            "instant_power_w": (
+                asset["real_power_kw"] * 1000
+            ),
+            "power_factor": asset["power_factor"],
+            "frequency_hz": asset["frequency_hz"],
+            "health_percent": asset["health_pct"],
+            "fault": asset["fault_code"] or "none",
+            "diagnostic": "REQUESTED",
+            "anomaly_count": (
+                1 if asset["fault_code"] else 0
+            ),
+            "source_system": "EES Power Grid Sun",
+        },
+    }
+
+    try:
+        response = httpx.post(
+            (
+                settings.rc_controls_api_url
+                + "/api/v1/rc/results"
+            ),
+            json=rc_payload,
+            timeout=10.0,
+        )
+
+        response.raise_for_status()
+
+        rc_result = response.json()
+
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "RC Controls API unavailable: "
+                f"{exc}"
+            ),
+        )
+
+    return {
+        "status": "forwarded",
+        "asset_code": asset["code"],
+        "operating_snapshot": asset,
+        "rc_controls": rc_result,
+    }
