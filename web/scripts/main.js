@@ -73,7 +73,96 @@ async function fetchSnapshot() {
 }
 function render() { let facilities = snapshot.facilities, assets = snapshot.assets; if (scope !== 'CAMPUS') { facilities = facilities.filter(f => f.code === scope); assets = assets.filter(a => a.facility === scope) } $('load').textContent = (scope === 'CAMPUS' ? snapshot.campus.real_power_kw : facilities.reduce((s, f) => s + f.real_power_kw, 0)).toFixed(1) + ' kW'; $('pf').textContent = snapshot.campus.power_factor.toFixed(3); $('kvar').textContent = snapshot.campus.reactive_power_kvar.toFixed(1) + ' kvar'; $('alerts').textContent = snapshot.campus.open_alerts; $('timestamp').textContent = new Date(snapshot.timestamp).toLocaleTimeString(); $('assets').innerHTML = assets.map(a => `<div class="asset" data-code="${a.code}"><div><b>${a.name}</b><small>${a.code} · ${a.area}</small></div><div><strong>${a.real_power_kw.toFixed(1)} kW</strong><small>${a.current_a.toFixed(1)} A · PF ${a.power_factor}</small></div></div>`).join('') || '<p>No live assets in scope.</p>'; $('alertList').innerHTML = snapshot.alerts.map(a => `<div class="alert ${a.severity.toLowerCase()}"><strong>${a.title}</strong><small>${a.message}</small></div>`).join('') || '<p>No active alerts.</p>'; document.querySelectorAll('.asset').forEach(el => el.onclick = () => openAsset(el.dataset.code)); drawChart(facilities); updateScene(scope) }
 function openAsset(code) { selected = snapshot.assets.find(a => a.code === code); if (!selected) return; $('assetName').textContent = selected.name; $('assetMetrics').innerHTML = Object.entries({ 'Asset code': selected.code, 'Facility': selected.facility, 'Operating state': selected.operating_state, 'Real power': selected.real_power_kw + ' kW', 'Voltage': selected.voltage_v + ' V', 'Current': selected.current_a + ' A', 'Power factor': selected.power_factor, 'Frequency': selected.frequency_hz + ' Hz', 'Breaker utilization': selected.breaker_utilization_pct + '%', 'Temperature': selected.temperature_c + ' °C', 'Health': selected.health_pct + '%', 'Fault': selected.fault_code || 'None' }).map(([k, v]) => `<div class="metric"><span>${k}</span><b>${v}</b></div>`).join(''); $('drawer').classList.add('open') }
-$('closeDrawer').onclick = () => $('drawer').classList.remove('open'); $('diagnose').onclick = async () => { if (!selected) return; try { const r = await fetch(cfg.apiBaseUrl + '/api/v1/diagnostics', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': 'change-me' }, body: JSON.stringify({ asset_code: selected.code }) }); const d = await r.json(); localStorage.setItem('eesRcDiagnostic', JSON.stringify(d)); alert('Diagnostic request created: ' + d.request_id) } catch { localStorage.setItem('eesRcDiagnostic', JSON.stringify({ operating_snapshot: selected, status: 'DEMO' })); alert('Demo diagnostic packet staged for RC Controls Twin.') } };
+$('closeDrawer').onclick = () => $('drawer').classList.remove('open'); $('diagnose').onclick = async () => {
+  if (!selected) return;
+
+  try {
+    const r = await fetch(
+      cfg.apiBaseUrl + '/api/v1/diagnostics',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          asset_code: selected.code,
+          diagnostic_type: 'electrical-health'
+        })
+      }
+    );
+
+    if (!r.ok) {
+      throw new Error(`HTTP ${r.status}`);
+    }
+
+    const d = await r.json();
+
+    // Preserve the production diagnostic response locally.
+    localStorage.setItem(
+      'eesRcDiagnostic',
+      JSON.stringify(d)
+    );
+
+    // Build a packet the RC Controls digital twin already understands.
+    const rcPacket = {
+      assets: [
+        {
+          id: selected.asset_id,
+          name: selected.name,
+          scenario: 'Power Grid diagnostic request',
+          health: selected.health_pct,
+          fault: selected.fault_code || 'none',
+          voltage: selected.voltage_v,
+          loadWatts: (selected.real_power_kw || 0) * 1000,
+          lineVoltage: selected.voltage_v,
+          powerFactor: selected.power_factor,
+          temperatureC: selected.temperature_c || 0,
+          faultCode: selected.fault_code || 'none'
+        }
+      ],
+      scope: 'RC'
+    };
+
+    const batchId = `power-grid-${Date.now()}`;
+
+    sessionStorage.setItem(
+      `ees.rc.batch.${batchId}`,
+      JSON.stringify(rcPacket)
+    );
+
+    localStorage.setItem(
+      `ees.rc.batch.${batchId}`,
+      JSON.stringify(rcPacket)
+    );
+
+    const eventId =
+      d?.rc_controls?.control_event_id || '';
+
+    console.log(
+      'RC Controls diagnostic forwarded:',
+      eventId
+    );
+
+    // Redirect into the live RC Controls digital twin.
+    window.location.href =
+      'https://jd-dev-king.github.io/EES-RC-Controls/' +
+      `?source=power-grid` +
+      `&scope=RC` +
+      `&batch=${encodeURIComponent(batchId)}` +
+      `&assetIndex=0` +
+      `&return=${encodeURIComponent(location.href)}`;
+
+  } catch (error) {
+    console.error(
+      'RC Controls diagnostic handoff failed:',
+      error
+    );
+
+    alert(
+      'Unable to send diagnostic request to EES RC Controls.'
+    );
+  }
+};
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => { document.querySelectorAll('nav button').forEach(x => x.classList.remove('active')); b.classList.add('active'); scope = b.dataset.scope; $('scopeTitle').textContent = b.textContent; render() }); $('simulate').onclick = async () => { try { await fetch(cfg.apiBaseUrl + '/api/v1/simulation/tick', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': 'change-me' }, body: JSON.stringify({ minutes: 1, fault_probability: .01 }) }); await fetchSnapshot() } catch { demo.facilities.forEach(f => f.real_power_kw *= .96 + Math.random() * .08); demo.timestamp = new Date().toISOString(); render() } };
 function drawChart(data) { const c = $('chart'), ctx = c.getContext('2d'), w = c.width = c.clientWidth * devicePixelRatio, h = c.height = 210 * devicePixelRatio; ctx.clearRect(0, 0, w, h); const max = Math.max(...data.map(x => x.real_power_kw), 1); data.forEach((d, i) => { const bw = w / (data.length * 1.7), x = (i + .35) * w / data.length, bh = d.real_power_kw / max * (h - 55); ctx.fillStyle = '#193b58'; ctx.fillRect(x, h - 30 - bh, bw, bh); ctx.fillStyle = '#58e8ff'; ctx.fillRect(x, h - 30 - bh, bw, 4); ctx.fillStyle = '#c9e8f5'; ctx.font = `${11 * devicePixelRatio}px sans-serif`; ctx.fillText(d.code, x, h - 10); ctx.fillText(d.real_power_kw.toFixed(0) + ' kW', x, h - 37 - bh) }) }
 let scene, camera, renderer, controls, buildings = []; function init3d() { const host = $('scene'); scene = new THREE.Scene(); scene.fog = new THREE.Fog(0x050914, 40, 100); camera = new THREE.PerspectiveCamera(45, host.clientWidth / host.clientHeight, .1, 200); camera.position.set(28, 28, 34); renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }); renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setSize(host.clientWidth, host.clientHeight); host.appendChild(renderer.domElement); controls = new OrbitControls(camera, renderer.domElement); controls.target.set(0, 0, 0); controls.enableDamping = true; scene.add(new THREE.HemisphereLight(0x78cfff, 0x07101d, 2.3)); const dl = new THREE.DirectionalLight(0xffffff, 2); dl.position.set(15, 30, 12); scene.add(dl); const ground = new THREE.Mesh(new THREE.BoxGeometry(46, .5, 34), new THREE.MeshStandardMaterial({ color: 0x0a1723, metalness: .5, roughness: .7 })); ground.position.y = -.3; scene.add(ground); const defs = [['PHARMA', -11, 0, 0, 12, 5, 13, 0x1b6381], ['LOGISTICS', 9, 0, -5, 15, 4, 9, 0x365981], ['UTILITIES', 8, 0, 9, 11, 6, 7, 0x6e5522], ['EXEC', -9, 0, 11, 9, 5, 6, 0x1c7b6f]]; defs.forEach(d => { const mesh = new THREE.Mesh(new THREE.BoxGeometry(d[4], d[5], d[6]), new THREE.MeshStandardMaterial({ color: d[7], metalness: .55, roughness: .35, emissive: d[7], emissiveIntensity: .12 })); mesh.position.set(d[1], d[5] / 2, d[3]); mesh.userData.code = d[0]; scene.add(mesh); buildings.push(mesh) }); for (let i = 0; i < 7; i++) { const p = new THREE.Mesh(new THREE.BoxGeometry(.25, .25, 6), new THREE.MeshBasicMaterial({ color: 0x58e8ff })); p.position.set(-3 + i, 0.4, -7 + i * .8); p.rotation.y = .6; scene.add(p) }; renderer.domElement.addEventListener('click', e => { const r = renderer.domElement.getBoundingClientRect(), m = new THREE.Vector2((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1), ray = new THREE.Raycaster(); ray.setFromCamera(m, camera); const hit = ray.intersectObjects(buildings)[0]; if (hit) { const b = document.querySelector(`nav button[data-scope="${hit.object.userData.code}"]`); b?.click() } }); new ResizeObserver(() => { if (host.clientWidth && host.clientHeight) { camera.aspect = host.clientWidth / host.clientHeight; camera.updateProjectionMatrix(); renderer.setSize(host.clientWidth, host.clientHeight) } }).observe(host); (function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera) })() }
