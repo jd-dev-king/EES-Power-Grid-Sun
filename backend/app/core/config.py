@@ -19,17 +19,26 @@ class Settings(BaseSettings):
         "http://localhost:8080,"
         "https://jd-dev-king.github.io"
     )
-    
+
     rc_controls_api_url: str = (
-    "https://ees-rc-controls-production.up.railway.app"
+        "https://ees-rc-controls-production.up.railway.app"
     )
 
     api_key: str = "change-me"
     simulation_interval_seconds: int = 2
 
+    # Universal Data Moon integration
+    data_moon_enabled: bool = True
+    data_moon_api_url: str = "http://127.0.0.1:8000"
+    data_moon_ingest_path: str = "/api/ingest/telemetry"
+    data_moon_health_path: str = "/health"
+    data_moon_ingest_api_key: str = ""
+    data_moon_system_key: str = "ees_power_grid_sun"
+    data_moon_timeout_seconds: float = 2.0
+
     model_config = SettingsConfigDict(
         env_file=".env",
-        extra="ignore"
+        extra="ignore",
     )
 
     @property
